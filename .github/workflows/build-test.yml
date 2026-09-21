@@ -26,6 +26,15 @@ jobs:
           bash -n box/scripts/box.service
           bash -n box/scripts/box.tool
 
+      - name: Guard UID and GID separation
+        shell: bash
+        run: |
+          if grep -F 'printf "%s\\n" "${gid_list[@]}" >> "${uid_list}"' box/scripts/box.service; then
+            echo "gid_list must never be appended to appuid.list"
+            exit 1
+          fi
+          grep -F '保持独立，不写入 appuid.list' box/scripts/box.service
+
       - name: Bundle pinned boxbpf
         shell: bash
         run: |
