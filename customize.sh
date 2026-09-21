@@ -186,7 +186,7 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
         if handle_choice "是否下载 GeoX 数据文件 (geoip/geosite)？" "下载" "跳过"; then
             COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD geox"
         fi
-        if handle_choice "是否下载实用工具 (yq, curl)？" "下载" "跳过"; then
+        if handle_choice "是否下载实用工具 (yq, curl, boxbpf)？" "下载" "跳过"; then
             COMPONENTS_TO_DOWNLOAD="$COMPONENTS_TO_DOWNLOAD utils"
         fi
         
@@ -243,6 +243,8 @@ if handle_choice "是否需要下载内核或数据文件？" "是，进行下�
                   /data/adb/box/scripts/box.tool upyq
                   ui_print "  -> 正在下载 curl..."
                   /data/adb/box/scripts/box.tool upcurl
+                  ui_print "  -> 正在下载 boxbpf..."
+                  /data/adb/box/scripts/box.tool upboxbpf
                   ;;
                 *)
                   ui_print "  -> 正在下载内核: $component..."
@@ -317,7 +319,7 @@ if [ "${backup_box}" = "true" ]; then
       chmod 755 "${target_path}"
     fi
   }
-  for bin_item in curl yq xray sing-box v2fly hysteria mihomo; do
+  for bin_item in curl yq boxbpf xray sing-box v2fly hysteria mihomo; do
     restore_binary "$bin_item"
   done
 
