@@ -358,3 +358,4 @@ if [ "$backup_box" = "true" ] && [ -n "$temp_dir" ] && [ -d "$temp_dir" ]; then
 fi
 
 ui_print "- 安装完成，请重启设备。"
+[ -f /data/adb/box/scripts/dns-rescue.sh ] && chmod 0755 /data/adb/box/scripts/dns-rescue.sh
