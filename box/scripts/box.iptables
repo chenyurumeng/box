@@ -1719,7 +1719,7 @@ setup_redirect_perf_external_chain() {
 
   setup_external_chain_common nat BOX_EXTERNAL
   apply_redirect_reply_bypass_rules BOX_EXTERNAL
-  ensure_dns_nat_hijack
+  ensure_dns_nat_hijack || return 1
   setup_perf_dest_chain nat "${ip_chain}"
   setup_perf_pre_if_chain nat "${if_chain}"
 
@@ -1956,7 +1956,7 @@ setup_redirect_external_chain() {
 
   setup_external_chain_common nat BOX_EXTERNAL
   apply_redirect_reply_bypass_rules BOX_EXTERNAL
-  ensure_dns_nat_hijack
+  ensure_dns_nat_hijack || return 1
   append_common_bypass_rules nat BOX_EXTERNAL
   apply_ignored_external_interfaces nat BOX_EXTERNAL
   apply_redirect_connmark_restore_rules BOX_EXTERNAL
@@ -2574,7 +2574,7 @@ start_tproxy() {
     apply_loopback_reject_rule "${tproxy_port}"
   fi
 
-  ensure_dns_nat_hijack
+  ensure_dns_nat_hijack || return 1
   setup_fake_ip_icmp_rules
 }
 
@@ -2645,6 +2645,8 @@ cleanup_iptables_for_mode() {
     iptables="${current_iptables}"
     cleanup_iptables_family "${cleanup_mode}" > /dev/null 2>&1
   done
+
+  cleanup_dns_app_bpf
 }
 
 cleanup_iptables() {
@@ -2684,6 +2686,10 @@ prepare_rule_apply() {
   cleanup_mode="$(cleanup_mode_for_apply)"
   log Debug "iptables 定向清理模式: ${cleanup_mode}"
   cleanup_iptables_for_mode "${cleanup_mode}"
+
+  if dns_mode_is_redirect_apps; then
+    prepare_dns_app_bpf || return 1
+  fi
 }
 
 apply_redirect_family() {
@@ -2767,7 +2773,7 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
     enable|renew)
       apply_capability_downgrades
       box_etc
-      prepare_rule_apply
+      prepare_rule_apply || exit 1
       setup_cn_ipset_if_needed
 
       [ $1 = "renew" ] && log Warning "正在清理 iptables 透明代理规则。"
@@ -2873,7 +2879,7 @@ else
       apply_capability_downgrades
       box_etc
 
-      prepare_rule_apply
+      prepare_rule_apply || exit 1
       setup_cn_ipset_if_needed
       wait_tun_ready
       [ $1 = "renew" ] && log Warning "正在清理 TUN 规则。"
