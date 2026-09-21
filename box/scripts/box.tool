@@ -350,6 +350,43 @@ reload() {
   esac
 }
 
+# 获取 boxbpf eBPF UID matcher
+upboxbpf() {
+  setup_github_api
+
+  case "$(uname -m)" in
+    aarch64|arm64)
+      ;;
+    *)
+      log Error "boxbpf 当前仅提供 arm64-v8a，设备架构: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  local repo_name="${boxbpf_repo:-boxproxy/boxproxy}"
+  local version="${boxbpf_version:-v0.0.2}"
+  local target="${bin_dir}/boxbpf"
+  local download_link="https://github.com/${repo_name}/releases/download/${version}/boxbpf-arm64-v8a"
+
+  log Info "下载 boxbpf ${version} (${repo_name})"
+  if ! upfile "${target}" "${download_link}"; then
+    log Error "boxbpf 下载失败"
+    return 1
+  fi
+
+  chown "${box_user_group}" "${target}" 2>/dev/null || true
+  chmod 0755 "${target}" || {
+    log Error "无法设置 boxbpf 可执行权限"
+    return 1
+  }
+
+  if ! "${target}" --probe --ipv6 0 >/dev/null 2>&1; then
+    log Warning "boxbpf 已下载，但当前内核/eBPF 环境探测未通过；redirect-apps 模式可能不可用"
+  else
+    log Info "boxbpf 安装并探测成功"
+  fi
+}
+
 # 获取最新的 curl
 upcurl() {
   setup_github_api
@@ -1539,7 +1576,7 @@ case "$1" in
   upcnip)
     upcnip
     ;;
-  upyq|upcurl)
+  upyq|upcurl|upboxbpf)
     $1
     ;;
   reload)
@@ -1551,6 +1588,7 @@ case "$1" in
   all)
     upyq
     upcurl
+    upboxbpf
     upgeox_all
     upkernels sing-box mihomo xray v2fly hysteria
     for bin_name in "${bin_list[@]}"; do
@@ -1560,7 +1598,7 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {check|memcg|cpuset|blkio|geosub|geox|subs|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
+    log Info "用法: $0 {check|memcg|cpuset|blkio|geosub|geox|subs|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upboxbpf|upcnip|reload|webroot|bond0|bond1|all}"
     log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, xray, v2fly, hysteria"
     ;;
 esac
