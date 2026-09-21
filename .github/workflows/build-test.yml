@@ -1,0 +1,50 @@
+name: Build test module
+
+on:
+  push:
+    branches:
+      - feat/app-scoped-dns-hijack
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          bash -n customize.sh
+          bash -n box/scripts/box.iptables
+          bash -n box/scripts/box.service
+          bash -n box/scripts/box.tool
+
+      - name: Bundle pinned boxbpf
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/boxproxy/boxproxy/releases/download/v0.0.2/boxbpf-arm64-v8a"
+          expected="d9f9545419ac9ce363dde1cd101cf0919ae15ed38ab68e54295634c7694c73b1"
+          curl -fL "$url" -o box/bin/boxbpf
+          echo "$expected  box/bin/boxbpf" | sha256sum -c -
+          chmod 0755 box/bin/boxbpf
+
+      - name: Build module ZIP
+        shell: bash
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          ls -lh box-*.zip
+
+      - name: Upload test module
+        uses: actions/upload-artifact@v4
+        with:
+          name: box-app-scoped-dns-test
+          path: box-*.zip
+          if-no-files-found: error
