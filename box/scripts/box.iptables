@@ -519,8 +519,16 @@ dns_mode_is_redirect_apps() {
   [ "${dns_hijack_mode}" = "redirect-apps" ]
 }
 
+dns_mode_is_split_apps() {
+  [ "${dns_hijack_mode}" = "split-apps" ]
+}
+
+dns_mode_uses_app_bpf() {
+  dns_mode_is_redirect_apps || dns_mode_is_split_apps
+}
+
 dns_mode_uses_redirect() {
-  dns_mode_is_redirect || dns_mode_is_redirect_apps
+  dns_mode_is_redirect || dns_mode_is_redirect_apps || dns_mode_is_split_apps
 }
 
 dns_mode_is_disable() {
@@ -563,7 +571,7 @@ ensure_bpffs() {
 }
 
 prepare_dns_app_bpf() {
-  dns_mode_is_redirect_apps || return 0
+  dns_mode_uses_app_bpf || return 0
 
   case "${network_mode}" in
     redirect|tproxy|mixed|enhance)
@@ -578,10 +586,15 @@ prepare_dns_app_bpf() {
     whitelist|white|blacklist|black)
       ;;
     *)
-      log Error "DNS redirect-apps 仅支持 whitelist/blacklist 代理模式，当前: ${proxy_mode}"
+      log Error "DNS 应用分流仅支持 whitelist/blacklist 代理模式，当前: ${proxy_mode}"
       return 1
       ;;
   esac
+
+  if dns_mode_is_split_apps && [[ "${proxy_mode}" != @(whitelist|white) ]]; then
+    log Error "DNS split-apps 第一版仅支持 whitelist 代理模式，当前: ${proxy_mode}"
+    return 1
+  fi
 
   if ! uid_list_has_entries; then
     log Error "DNS redirect-apps 需要非空应用 UID 列表，请检查 package.list.cfg"
@@ -686,6 +699,116 @@ append_app_scoped_dns_nat_rules() {
   esac
 }
 
+local_dns_port_listening() {
+  local port="$1"
+  local port_hex f
+  port_hex=$(printf '%04X' "${port}")
+  for f in /proc/net/udp /proc/net/udp6 /proc/net/tcp /proc/net/tcp6; do
+    [ -r "${f}" ] || continue
+    busybox awk -v pat=":${port_hex}$" 'NR > 1 && $2 ~ pat { found = 1 } END { exit !found }' "${f}" && return 0
+  done
+  return 1
+}
+
+append_agh_dns_self_bypass() {
+  local chain_name="$1"
+  # AGH runs as root:net_raw.  Its own bootstrap/plain DNS must never loop
+  # back into either local AGH instance.
+  ensure_rule_append nat "${chain_name}" -m owner --uid-owner "${agh_user:-0}" --gid-owner "${agh_group:-3004}" -j RETURN
+}
+
+append_split_app_match_redirect() {
+  local chain_name="$1"
+  local pin="$2"
+  local port="$3"
+
+  if dns_tcp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -m bpf --object-pinned "${pin}" -j REDIRECT --to-ports "${port}"
+  fi
+  if dns_udp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p udp --dport 53 -m bpf --object-pinned "${pin}" -j REDIRECT --to-ports "${port}"
+  fi
+}
+
+append_split_domestic_redirect() {
+  local chain_name="$1"
+  local port="$2"
+
+  if dns_tcp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -j REDIRECT --to-ports "${port}"
+  fi
+  if dns_udp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p udp --dport 53 -j REDIRECT --to-ports "${port}"
+  fi
+}
+
+setup_split_app_dns_nat_rules() {
+  local chain_name="$1"
+  local family="$2"
+  local pin foreign_port domestic_port fallback_port fail_port foreign_target
+  local foreign_state="down"
+  local domestic_state="down"
+  local fallback_state="down"
+
+  pin="$(dns_app_bpf_pin)"
+  [ -e "${pin}" ] || {
+    log Error "split-apps eBPF matcher 不存在: ${pin}"
+    return 1
+  }
+
+  foreign_port="${foreign_dns_port:-5592}"
+  domestic_port="${domestic_dns_port:-5591}"
+  fallback_port="${foreign_dns_fallback_port:-1053}"
+  fail_port="${foreign_dns_fail_port:-65534}"
+
+  local_dns_port_listening "${foreign_port}" && foreign_state="up"
+  local_dns_port_listening "${domestic_port}" && domestic_state="up"
+  local_dns_port_listening "${fallback_port}" && fallback_state="up"
+
+  append_agh_dns_self_bypass "${chain_name}"
+
+  if [ "${foreign_state}" = "up" ]; then
+    foreign_target="${foreign_port}"
+  elif [ "${fallback_state}" = "up" ]; then
+    foreign_target="${fallback_port}"
+    [ "${family}" = "4" ] && log Warning "Foreign AGH :${foreign_port} 不可用，白名单 DNS 回退到 Mihomo :${fallback_port}"
+  else
+    foreign_target="${fail_port}"
+    [ "${family}" = "4" ] && log Error "Foreign AGH 与 Mihomo DNS 均不可用；白名单 DNS fail-closed 到本地 :${fail_port}"
+  fi
+
+  append_split_app_match_redirect "${chain_name}" "${pin}" "${foreign_target}"
+
+  if [ "${domestic_state}" = "up" ]; then
+    append_split_domestic_redirect "${chain_name}" "${domestic_port}"
+  else
+    [ "${family}" = "4" ] && log Warning "Domestic AGH :${domestic_port} 不可用；非白名单恢复 Android 系统 DNS"
+  fi
+
+  [ "${family}" = "4" ] && log Info "DNS split-apps: foreign=${foreign_state} fallback=${fallback_state} domestic=${domestic_state}"
+}
+
+ensure_split_ipv6_dns_reject() {
+  [ "${ipv6}" = "true" ] || return 0
+  local chain_name="BOX_DNS6_REJECT"
+  ensure_chain filter "${chain_name}"
+
+  if dns_udp_enabled; then
+    ensure_rule_append filter "${chain_name}" -p udp --dport 53 -j REJECT --reject-with icmp6-port-unreachable ||
+      ensure_rule_append filter "${chain_name}" -p udp --dport 53 -j DROP
+  fi
+  if dns_tcp_enabled; then
+    ensure_rule_append filter "${chain_name}" -p tcp --dport 53 -j REJECT --reject-with tcp-reset ||
+      ensure_rule_append filter "${chain_name}" -p tcp --dport 53 -j DROP
+  fi
+  ensure_jump filter OUTPUT "${chain_name}"
+}
+
+cleanup_split_ipv6_dns_reject() {
+  del_jump_silent filter OUTPUT BOX_DNS6_REJECT
+  cleanup_chain_fast filter BOX_DNS6_REJECT
+}
+
 setup_nat_dns_hijack() {
   local chain_name="$1"
   local dns_port="$2"
@@ -694,6 +817,13 @@ setup_nat_dns_hijack() {
   ensure_chain nat "${chain_name}"
   if ! add_core_bypass_rule nat "${chain_name}" -I; then
     [ "${iptables}" = "$IPV" ] && log Warning "DNS 核心进程旁路失败，owner 匹配不可用，可能导致 DNS 回环。"
+  fi
+
+  if dns_mode_is_split_apps; then
+    setup_split_app_dns_nat_rules "${chain_name}" "${family}" || return 1
+    ensure_jump nat OUTPUT "${chain_name}"
+    [ "${iptables}" = "$IPV" ] && log Info "DNS split-apps：白名单 -> Foreign AGH，非白名单 -> Domestic AGH"
+    return 0
   fi
 
   if dns_mode_is_redirect_apps; then
@@ -840,7 +970,12 @@ setup_nat_dns_forward() {
 ensure_dns_nat_hijack() {
   dns_mode_uses_redirect || dns_should_use_mihomo_forward || return 0
   if [ "${iptables}" = "$IP6V" ] && ! ip6_nat_supported; then
-    [ "${ipv6}" = "true" ] && log Warning "ip6tables NAT 不可用，跳过 IPv6 DNS 重定向。"
+    if dns_mode_is_split_apps; then
+      log Warning "ip6tables NAT 不可用；split-apps 使用 REJECT 使系统 DNS 快速回退 IPv4。"
+      ensure_split_ipv6_dns_reject
+    else
+      [ "${ipv6}" = "true" ] && log Warning "ip6tables NAT 不可用，跳过 IPv6 DNS 重定向。"
+    fi
     return 0
   fi
 
@@ -1089,10 +1224,31 @@ append_local_protocol_rule() {
   esac
 }
 
+append_agh_upstream_direct_rules() {
+  local table_name="$1"
+  local chain_name="$2"
+  local ip proto
+
+  [ "${iptables}" = "$IPV" ] || return 0
+  dns_mode_is_split_apps || return 0
+
+  for ip in ${agh_direct_dns_ips[@]}; do
+    for proto in tcp udp; do
+      ensure_rule_append "${table_name}" "${chain_name}" -p "${proto}" --dport 443 -d "${ip}" \
+        -m owner --uid-owner "${agh_user:-0}" --gid-owner "${agh_group:-3004}" -j RETURN
+    done
+  done
+}
+
 apply_local_proxy_rules() {
   local table_name="$1"
   local chain_name="$2"
   local action="$3"
+
+  # AGH runs as root:net_raw, while Box whitelist mode normally proxies UID 0.
+  # Only the fixed DNS upstream endpoints are forced DIRECT; filter downloads
+  # and other AGH HTTP traffic continue to follow ordinary Box routing.
+  append_agh_upstream_direct_rules "${table_name}" "${chain_name}"
 
   case "${proxy_mode}" in
     core)
@@ -1375,6 +1531,7 @@ cleanup_dns_nat_hijack_chains() {
     del_jump_silent nat PREROUTING NAT_DNS_FORWARD6
     del_jump_silent nat OUTPUT NAT_DNS_FORWARD6
     cleanup_chain_fast nat NAT_DNS_FORWARD6
+    cleanup_split_ipv6_dns_reject
   fi
 }
 
@@ -2687,7 +2844,7 @@ prepare_rule_apply() {
   log Debug "iptables 定向清理模式: ${cleanup_mode}"
   cleanup_iptables_for_mode "${cleanup_mode}"
 
-  if dns_mode_is_redirect_apps; then
+  if dns_mode_uses_app_bpf; then
     prepare_dns_app_bpf || return 1
   fi
 }
@@ -2760,6 +2917,28 @@ log_iptables_results() {
   local applied_uids=$(cat "${uid_list}" 2>/dev/null | tr '\n' ' ')
   [ -n "$applied_uids" ] && log Debug "UID 列表: ${applied_uids}"
 }
+
+renew_dns_only() {
+  apply_capability_downgrades
+
+  if dns_mode_uses_app_bpf && [ ! -e "${boxbpf_pin_app4}" ]; then
+    prepare_dns_app_bpf || return 1
+  fi
+
+  local current_iptables
+  for current_iptables in "$IPV" "$IP6V"; do
+    iptables="${current_iptables}"
+    cleanup_dns_nat_hijack_chains >/dev/null 2>&1 || true
+    ensure_dns_nat_hijack || return 1
+  done
+
+  log Info "DNS 规则健康刷新完成。"
+}
+
+if [ "$1" = "renew-dns" ]; then
+  renew_dns_only
+  exit $?
+fi
 
 runtime_loaded="false"
 if [ "$1" = "disable" ]; then
