@@ -1,6 +1,7 @@
 name: Build test module
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feat/app-scoped-dns-hijack
