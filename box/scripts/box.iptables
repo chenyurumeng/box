@@ -511,6 +511,181 @@ apply_capability_downgrades() {
   log_capabilities
 }
 
+dns_mode_is_redirect() {
+  [ "${dns_hijack_mode}" = "redirect" ]
+}
+
+dns_mode_is_redirect_apps() {
+  [ "${dns_hijack_mode}" = "redirect-apps" ]
+}
+
+dns_mode_uses_redirect() {
+  dns_mode_is_redirect || dns_mode_is_redirect_apps
+}
+
+dns_mode_is_disable() {
+  [ "${dns_hijack_mode}" = "disable" ]
+}
+
+dns_app_bpf_pin() {
+  if [ "${iptables}" = "$IP6V" ]; then
+    printf '%s\n' "${boxbpf_pin_app6}"
+  else
+    printf '%s\n' "${boxbpf_pin_app4}"
+  fi
+}
+
+apply_boxbpf_selinux_policy() {
+  local rule='allow netd * bpf { prog_run map_read map_write }'
+  local tool
+
+  for tool in magiskpolicy /data/adb/magisk/magiskpolicy supolicy /system/xbin/supolicy /system/bin/supolicy; do
+    if command -v "${tool}" >/dev/null 2>&1 || [ -x "${tool}" ]; then
+      "${tool}" --live "${rule}" >/dev/null 2>&1 && return 0
+    fi
+  done
+
+  for tool in ksud /data/adb/ksud /data/adb/ksu/bin/ksud; do
+    if command -v "${tool}" >/dev/null 2>&1 || [ -x "${tool}" ]; then
+      "${tool}" sepolicy patch "${rule}" >/dev/null 2>&1 && return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_bpffs() {
+  [ -d /sys/fs/bpf ] || mkdir -p /sys/fs/bpf >/dev/null 2>&1 || return 1
+  if mount 2>/dev/null | busybox grep -qE '[[:space:]]/sys/fs/bpf[[:space:]].*bpf'; then
+    return 0
+  fi
+  mount -t bpf bpf /sys/fs/bpf >/dev/null 2>&1
+}
+
+prepare_dns_app_bpf() {
+  dns_mode_is_redirect_apps || return 0
+
+  case "${network_mode}" in
+    redirect|tproxy|mixed|enhance)
+      ;;
+    *)
+      log Error "DNS redirect-apps 暂不支持网络模式: ${network_mode}"
+      return 1
+      ;;
+  esac
+
+  case "${proxy_mode}" in
+    whitelist|white|blacklist|black)
+      ;;
+    *)
+      log Error "DNS redirect-apps 仅支持 whitelist/blacklist 代理模式，当前: ${proxy_mode}"
+      return 1
+      ;;
+  esac
+
+  if ! uid_list_has_entries; then
+    log Error "DNS redirect-apps 需要非空应用 UID 列表，请检查 package.list.cfg"
+    return 1
+  fi
+
+  if [ ! -x "${boxbpf_bin}" ]; then
+    log Error "缺少 boxbpf: ${boxbpf_bin}；请先执行 /data/adb/box/scripts/box.tool upboxbpf"
+    return 1
+  fi
+
+  if ! ${IPV} -m bpf -h >/dev/null 2>&1 && ! cap_has_match 4 bpf; then
+    log Error "IPv4 iptables 不支持 -m bpf，无法启用 redirect-apps"
+    return 1
+  fi
+  if [ "${ipv6}" = "true" ] && ! ${IP6V} -m bpf -h >/dev/null 2>&1 && ! cap_has_match 6 bpf; then
+    log Error "IPv6 ip6tables 不支持 -m bpf，无法启用 redirect-apps"
+    return 1
+  fi
+
+  ensure_bpffs || {
+    log Error "无法挂载或访问 /sys/fs/bpf"
+    return 1
+  }
+
+  apply_boxbpf_selinux_policy || log Warning "未能预先注入 boxbpf SELinux 规则，将继续尝试加载"
+
+  mkdir -p "${boxbpf_state_dir}" >/dev/null 2>&1 || return 1
+  : > "${boxbpf_empty4}"
+  : > "${boxbpf_empty6}"
+  : > "${boxbpf_force_uids}"
+
+  local ipv6_json="false"
+  [ "${ipv6}" = "true" ] && ipv6_json="true"
+
+  cat > "${boxbpf_config}" <<EOF
+{
+  "ipv6": ${ipv6_json},
+  "cidr4": "${boxbpf_empty4}",
+  "cidr6": "${boxbpf_empty6}",
+  "forceUids": "${boxbpf_force_uids}",
+  "appUids": "${uid_list}"
+}
+EOF
+
+  if ! "${boxbpf_bin}" --apply --config "${boxbpf_config}" >>"${box_log}" 2>&1; then
+    log Error "boxbpf UID matcher 加载失败；为防止 DNS 全局误劫持，已中止规则应用"
+    return 1
+  fi
+
+  if [ ! -e "${boxbpf_pin_app4}" ]; then
+    log Error "boxbpf IPv4 UID matcher 未生成: ${boxbpf_pin_app4}"
+    return 1
+  fi
+  if [ "${ipv6}" = "true" ] && [ ! -e "${boxbpf_pin_app6}" ]; then
+    log Error "boxbpf IPv6 UID matcher 未生成: ${boxbpf_pin_app6}"
+    return 1
+  fi
+
+  log Info "redirect-apps eBPF UID matcher 已加载"
+  return 0
+}
+
+cleanup_dns_app_bpf() {
+  [ -f "${boxbpf_config}" ] || return 0
+  if [ -x "${boxbpf_bin}" ]; then
+    "${boxbpf_bin}" --clear >/dev/null 2>&1 || true
+  fi
+  rm -rf "${boxbpf_state_dir}" >/dev/null 2>&1 || true
+}
+
+append_app_scoped_dns_nat_rules() {
+  local chain_name="$1"
+  local dns_port="$2"
+  local pin
+
+  pin="$(dns_app_bpf_pin)"
+  [ -e "${pin}" ] || {
+    log Error "应用 UID eBPF matcher 不存在: ${pin}"
+    return 1
+  }
+
+  case "${proxy_mode}" in
+    whitelist|white)
+      if dns_tcp_enabled; then
+        ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -m bpf --object-pinned "${pin}" -j REDIRECT --to-ports "${dns_port}"
+      fi
+      if dns_udp_enabled; then
+        ensure_rule_append nat "${chain_name}" -p udp --dport 53 -m bpf --object-pinned "${pin}" -j REDIRECT --to-ports "${dns_port}"
+      fi
+      ;;
+    blacklist|black)
+      if dns_tcp_enabled; then
+        ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -m bpf --object-pinned "${pin}" -j RETURN
+        ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -j REDIRECT --to-ports "${dns_port}"
+      fi
+      if dns_udp_enabled; then
+        ensure_rule_append nat "${chain_name}" -p udp --dport 53 -m bpf --object-pinned "${pin}" -j RETURN
+        ensure_rule_append nat "${chain_name}" -p udp --dport 53 -j REDIRECT --to-ports "${dns_port}"
+      fi
+      ;;
+  esac
+}
+
 setup_nat_dns_hijack() {
   local chain_name="$1"
   local dns_port="$2"
@@ -520,6 +695,14 @@ setup_nat_dns_hijack() {
   if ! add_core_bypass_rule nat "${chain_name}" -I; then
     [ "${iptables}" = "$IPV" ] && log Warning "DNS 核心进程旁路失败，owner 匹配不可用，可能导致 DNS 回环。"
   fi
+
+  if dns_mode_is_redirect_apps; then
+    append_app_scoped_dns_nat_rules "${chain_name}" "${dns_port}" || return 1
+    ensure_jump nat OUTPUT "${chain_name}"
+    [ "${iptables}" = "$IPV" ] && log Info "DNS redirect-apps：仅代理应用 UID 重定向到本地 DNS :${dns_port}"
+    return 0
+  fi
+
   if [ "${family}" = "4" ] && [ "${ignore_ap_list}" != "" ]; then
     for ignore in ${ignore_ap_list[@]} ; do
       ensure_rule_append nat "${chain_name}" -i "${ignore}" -j RETURN
@@ -533,14 +716,6 @@ setup_nat_dns_hijack() {
   fi
   ensure_jump nat PREROUTING "${chain_name}"
   ensure_jump nat OUTPUT "${chain_name}"
-}
-
-dns_mode_is_redirect() {
-  [ "${dns_hijack_mode}" = "redirect" ]
-}
-
-dns_mode_is_disable() {
-  [ "${dns_hijack_mode}" = "disable" ]
 }
 
 dns_tcp_enabled() {
@@ -636,7 +811,7 @@ dns_target_port() {
 dns_should_use_mihomo_forward() {
   [ "${mihomo_dns_forward}" = "enable" ] || return 1
   [ "${bin_name}" = "mihomo" ] || return 1
-  dns_mode_is_redirect && return 1
+  dns_mode_uses_redirect && return 1
   dns_mode_is_disable && return 1
   return 0
 }
@@ -663,7 +838,7 @@ setup_nat_dns_forward() {
 }
 
 ensure_dns_nat_hijack() {
-  dns_mode_is_redirect || dns_should_use_mihomo_forward || return 0
+  dns_mode_uses_redirect || dns_should_use_mihomo_forward || return 0
   if [ "${iptables}" = "$IP6V" ] && ! ip6_nat_supported; then
     [ "${ipv6}" = "true" ] && log Warning "ip6tables NAT 不可用，跳过 IPv6 DNS 重定向。"
     return 0
@@ -676,7 +851,7 @@ ensure_dns_nat_hijack() {
     family="6"
   fi
 
-  if dns_mode_is_redirect; then
+  if dns_mode_uses_redirect; then
     setup_nat_dns_hijack "${chain_name}" "$(dns_target_port)" "${family}"
   else
     if [ "${iptables}" = "$IPV" ]; then
@@ -764,7 +939,7 @@ apply_mangle_dns_rules() {
   local chain_name="$1"
   local rule_mode="$2"
 
-  if dns_mode_is_redirect || dns_mode_is_disable || dns_should_use_mihomo_forward; then
+  if dns_mode_uses_redirect || dns_mode_is_disable || dns_should_use_mihomo_forward; then
     append_dns_return_rules "${chain_name}"
     return 0
   fi
