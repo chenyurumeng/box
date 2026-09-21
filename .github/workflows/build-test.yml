@@ -46,6 +46,19 @@ jobs:
             exit 1
           fi
 
+      - name: Validate split-apps DNS safety
+        shell: bash
+        run: |
+          bash -n box/scripts/dns-rescue.sh
+          grep -F 'dns_mode_is_split_apps()' box/scripts/box.iptables
+          grep -F 'Foreign AGH 与 Mihomo DNS 均不可用' box/scripts/box.iptables
+          grep -F 'Domestic AGH' box/scripts/box.iptables
+          grep -F 'renew-dns' box/scripts/box.iptables
+          grep -F 'dns_hijack_mode="split-apps"' <(sed 's/dns_hijack_mode="tproxy"/dns_hijack_mode="split-apps"/' box/settings.ini)
+          grep -F 'domestic_dns_port="5591"' box/settings.ini
+          grep -F 'foreign_dns_port="5592"' box/settings.ini
+          grep -F 'cache-algorithm: arc' box/mihomo/config.yaml
+
       - name: Bundle pinned boxbpf
         shell: bash
         run: |
