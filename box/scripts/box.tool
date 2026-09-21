@@ -374,6 +374,17 @@ upboxbpf() {
     return 1
   fi
 
+  if [ -n "${boxbpf_sha256}" ]; then
+    local actual_sha
+    actual_sha="$(busybox sha256sum "${target}" 2>/dev/null | busybox awk '{print $1}')"
+    if [ "${actual_sha}" != "${boxbpf_sha256}" ]; then
+      log Error "boxbpf SHA-256 校验失败: expected=${boxbpf_sha256}, actual=${actual_sha:-unknown}"
+      rm -f "${target}"
+      return 1
+    fi
+    log Info "boxbpf SHA-256 校验通过"
+  fi
+
   chown "${box_user_group}" "${target}" 2>/dev/null || true
   chmod 0755 "${target}" || {
     log Error "无法设置 boxbpf 可执行权限"
