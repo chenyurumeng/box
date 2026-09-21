@@ -35,6 +35,17 @@ jobs:
           fi
           grep -F '保持独立，不写入 appuid.list' box/scripts/box.service
 
+      - name: Validate default Mihomo DNS policy
+        shell: bash
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file("box/mihomo/config.yaml")'
+          grep -F "'https://8.8.8.8/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F "'https://1.1.1.1/dns-query#国外代理'" box/mihomo/config.yaml
+          if grep -q '^[[:space:]]*nameserver-policy:' box/mihomo/config.yaml; then
+            echo "default Mihomo config must not split app DNS back to domestic resolvers"
+            exit 1
+          fi
+
       - name: Bundle pinned boxbpf
         shell: bash
         run: |
