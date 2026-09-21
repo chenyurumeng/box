@@ -101,9 +101,12 @@ find_packages_uid() {
 
   rm -f "${request_file}" "${map_file}" >/dev/null 2>&1 || true
 
+  # GID 与应用 UID 必须保持为两个独立集合。
+  # gid.list.cfg 会在 iptables 规则中通过 --gid-owner 单独处理；
+  # 不能写入 appuid.list，否则 GID 数值会被后续逻辑误当成 --uid-owner，
+  # 造成 UID 数值碰撞的非白名单应用被错误代理，同时污染 DNS eBPF UID map。
   if [ ${#gid_list[@]} -gt 0 ]; then
-    printf "%s\n" "${gid_list[@]}" >> "${uid_list}"
-    log Debug "GID: ${gid_list[*]} -> 已添加"
+    log Debug "GID: ${gid_list[*]} -> 保持独立，不写入 appuid.list"
   fi
 
   if [ -s "${uid_list}" ]; then
