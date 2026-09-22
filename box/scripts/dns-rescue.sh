@@ -8,7 +8,7 @@ IPT="iptables -w 10"
 IP6T="ip6tables -w 10"
 
 cleanup_v4() {
-  for chain in NAT_DNS_HIJACK NAT_DNS_FORWARD MIHOMO_DNS_EXTERNAL MIHOMO_DNS_LOCAL; do
+  for chain in NAT_DNS_HIJACK_NEXT NAT_DNS_HIJACK NAT_DNS_FORWARD MIHOMO_DNS_EXTERNAL MIHOMO_DNS_LOCAL; do
     $IPT -t nat -D OUTPUT -j "$chain" >/dev/null 2>&1 || true
     $IPT -t nat -D PREROUTING -j "$chain" >/dev/null 2>&1 || true
     $IPT -t nat -F "$chain" >/dev/null 2>&1 || true
