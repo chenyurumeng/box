@@ -2960,6 +2960,13 @@ renew_split_dns_atomic_v4() {
 }
 
 renew_dns_only() {
+  # Do not recreate DNS hooks after an intentional Box stop.  The AGH
+  # watchdog may observe listener changes slightly after service cleanup.
+  if [ -f "${box_run_state}/user_stopped" ]; then
+    log Info "Box 已被主动停止，跳过 DNS 规则重建。"
+    return 0
+  fi
+
   apply_capability_downgrades
   probe_user_group || log Warning "DNS 健康刷新未能探测 Box 核心 UID/GID，将使用可用旁路规则。"
 
