@@ -77,21 +77,26 @@ dns:
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
     - "rule-set:Fake-IP-Filter"
-  # 国内 DNS 仅用于 bootstrap，避免国外 DoH 地址/代理节点域名解析形成循环依赖。
+  # 仅用于解析国外 DoH 服务地址；使用 IP 形式的国内 DoH，避免明文 bootstrap DNS 污染。
   default-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
+    - https://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
 
   # 仅用于解析代理节点自身域名，不处理进入 Mihomo 的普通应用 DNS。
+  # 与 default-nameserver 独立，避免代理节点解析形成回环。
   proxy-server-nameserver:
     - https://223.5.5.5/dns-query
     - https://1.12.12.12/dns-query
 
-  # 进入 Mihomo 的应用 DNS 一律使用国外 DoH，并强制通过“国外代理”组。
+  # Foreign AGH :5592 只把过滤后的查询转发到本机 :1053。
+  # Mihomo 再通过“国外代理”组建立五个国外 DoH 连接。
   # 必须保留引号，避免 YAML 将 # 后内容解释为注释。
   nameserver:
-    - 'https://8.8.8.8/dns-query#国外代理'
+    - 'https://doh.cleanbrowsing.org/doh/security-filter/#国外代理'
     - 'https://1.1.1.1/dns-query#国外代理'
+    - 'https://1.0.0.1/dns-query#国外代理'
+    - 'https://dns.google/dns-query#国外代理'
+    - 'https://dns.quad9.net/dns-query#国外代理'
 
 proxies:
   - {name: DNS_Hijack, type: dns}
