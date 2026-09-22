@@ -63,6 +63,14 @@ jobs:
           grep -F 'domestic_dns_port="5591"' box/settings.ini
           grep -F 'foreign_dns_port="5592"' box/settings.ini
           grep -F 'cache-algorithm: arc' box/mihomo/config.yaml
+          grep -F 'apply-apps)' box/scripts/box.service
+          grep -F 'apply_app_rules()' box/scripts/box.service
+          grep -F 'blacklist|black)' box/scripts/box.iptables
+          grep -F '黑名单应用 -> Domestic AGH，其余 -> Foreign AGH' box/scripts/box.iptables
+          if grep -q '^updateJson=' module.prop; then
+            echo "fork module.prop must not expose upstream updateJson"
+            exit 1
+          fi
 
       - name: Bundle pinned boxbpf
         shell: bash
