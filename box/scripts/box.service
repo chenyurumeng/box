@@ -1383,12 +1383,18 @@ fi
 
 case "$1" in
   start)
+    # Always remove stale transparent/DNS rules before bringing the core up.
+    # action.sh will install fresh rules after start succeeds.
+    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box >/dev/null 2>&1
     if start_box; then
         $scripts_dir/box.tool webroot >/dev/null 2>&1
     fi
     ;;
   stop)
+    # Direct box.service stop must be a complete network recovery action, not
+    # merely kill Mihomo while leaving REDIRECT/TPROXY hooks behind.
+    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box
     ;;
   restart)
