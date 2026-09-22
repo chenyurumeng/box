@@ -1523,6 +1523,8 @@ cleanup_quic_block_rules() {
 
 cleanup_dns_nat_hijack_chains() {
   if [ "${iptables}" = "$IPV" ]; then
+    del_jump_silent nat OUTPUT NAT_DNS_HIJACK_NEXT
+    cleanup_chain_fast nat NAT_DNS_HIJACK_NEXT
     del_jump_silent nat PREROUTING NAT_DNS_HIJACK
     del_jump_silent nat OUTPUT NAT_DNS_HIJACK
     cleanup_chain_fast nat NAT_DNS_HIJACK
