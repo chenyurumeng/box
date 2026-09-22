@@ -1388,6 +1388,49 @@ force_stop() {
   fi
 }
 
+apply_app_rules() {
+  # settings.ini and package.list.cfg are sourced/read at process start, so this
+  # command is intentionally invoked as a fresh box.service process by the app.
+  find_packages_uid
+  get_dns_mode
+
+  if ! busybox pidof "${bin_name}" >/dev/null 2>&1; then
+    log Warning "Box 当前未运行；应用分流配置已保存，将在下次启动时生效。"
+    return 0
+  fi
+
+  case "${bin_name}" in
+    mihomo)
+      if [ "${auto_modify_config}" = "true" ]; then
+        prepare_mihomo
+      fi
+      "${scripts_dir}/box.tool" reload || {
+        log Error "Mihomo 配置热重载失败"
+        return 1
+      }
+      ;;
+    sing-box)
+      if [ "${auto_modify_config}" = "true" ]; then
+        prepare_singbox
+      fi
+      "${scripts_dir}/box.tool" reload || {
+        log Warning "sing-box 热重载失败，回退为服务重启"
+        "${scripts_dir}/box.service" restart
+        return $?
+      }
+      ;;
+    *)
+      log Warning "${bin_name} 不支持应用列表热重载，回退为服务重启"
+      "${scripts_dir}/box.service" restart
+      return $?
+      ;;
+  esac
+
+  "${scripts_dir}/box.iptables" renew || return 1
+  log Info "应用分流已实时应用: mode=${proxy_mode}, count=$(busybox wc -l < "${uid_list}" 2>/dev/null)"
+  return 0
+}
+
 # 检查系统是否安装了 busybox
 if ! command -v busybox &> /dev/null; then
   log Error "$(which busybox) 命令未找到"
@@ -1421,6 +1464,9 @@ case "$1" in
       "${scripts_dir}/box.iptables" renew
       $scripts_dir/box.tool webroot >/dev/null 2>&1
     fi
+    ;;
+  apply-apps)
+    apply_app_rules
     ;;
   status)
     # 检查服务是否在运行
