@@ -7,6 +7,13 @@
 - [CHIZI-0618/AndroidTProxyShell](https://github.com/CHIZI-0618/AndroidTProxyShell)
 - [taamarin/box_for_magisk](https://github.com/taamarin/box_for_magisk)
 
+
+### split-apps + Dual AdGuard Home
+
+实验性 `dns_hijack_mode="split-apps"` 可将白名单应用 DNS 送到 Foreign AGH :5592，其余应用 DNS 送到 Domestic AGH :5591。运行中实例故障会动态回退：Domestic 故障恢复系统 DNS，Foreign 故障回退 Mihomo :1053；两种国外后端都不可用时白名单 DNS fail-closed。独立 `box/scripts/dns-rescue.sh` 可无条件移除 Box DNS hooks。
+
+验证步骤见 [docs/split-apps-agh-validation.md](docs/split-apps-agh-validation.md)。
+
 ## 项目定位
 
 本仓库主要提供：
