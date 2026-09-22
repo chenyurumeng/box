@@ -1229,20 +1229,17 @@ append_local_protocol_rule() {
   esac
 }
 
-append_agh_upstream_direct_rules() {
+append_agh_process_direct_rules() {
   local table_name="$1"
   local chain_name="$2"
-  local ip proto
 
-  [ "${iptables}" = "$IPV" ] || return 0
   dns_mode_is_split_apps || return 0
 
-  for ip in ${agh_direct_dns_ips[@]}; do
-    for proto in tcp udp; do
-      ensure_rule_append "${table_name}" "${chain_name}" -p "${proto}" --dport 443 -d "${ip}" \
-        -m owner --uid-owner "${agh_user:-0}" --gid-owner "${agh_group:-3004}" -j RETURN
-    done
-  done
+  # AGH has a dedicated process identity (root:net_raw).  In whitelist mode
+  # Box normally proxies UID 0; this earlier RETURN makes both domestic and
+  # foreign AGH upstreams direct, including hostname-based DoH endpoints.
+  ensure_rule_append "${table_name}" "${chain_name}" \
+    -m owner --uid-owner "${agh_user:-0}" --gid-owner "${agh_group:-3004}" -j RETURN
 }
 
 apply_local_proxy_rules() {
@@ -1251,9 +1248,8 @@ apply_local_proxy_rules() {
   local action="$3"
 
   # AGH runs as root:net_raw, while Box whitelist mode normally proxies UID 0.
-  # Only the fixed DNS upstream endpoints are forced DIRECT; filter downloads
-  # and other AGH HTTP traffic continue to follow ordinary Box routing.
-  append_agh_upstream_direct_rules "${table_name}" "${chain_name}"
+  # The dedicated AGH process identity is always direct in split-apps mode.
+  append_agh_process_direct_rules "${table_name}" "${chain_name}"
 
   case "${proxy_mode}" in
     core)
