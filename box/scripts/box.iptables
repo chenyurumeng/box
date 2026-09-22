@@ -596,12 +596,17 @@ prepare_dns_app_bpf() {
       ;;
   esac
 
-  if dns_mode_is_split_apps && [[ "${proxy_mode}" != @(whitelist|white) ]]; then
-    log Error "DNS split-apps 第一版仅支持 whitelist 代理模式，当前: ${proxy_mode}"
-    return 1
-  fi
-
+  # split-apps supports both list semantics:
+  # whitelist: selected apps -> Foreign AGH, others -> Domestic AGH
+  # blacklist: selected apps -> Domestic AGH, others -> Foreign AGH
+  # An empty list is meaningful (whitelist = all domestic, blacklist = all foreign)
+  # and does not require an eBPF UID map.
   if ! uid_list_has_entries; then
+    if dns_mode_is_split_apps; then
+      cleanup_dns_app_bpf
+      log Info "DNS split-apps 应用列表为空，按 ${proxy_mode} 的全量语义应用"
+      return 0
+    fi
     log Error "DNS redirect-apps 需要非空应用 UID 列表，请检查 package.list.cfg"
     return 1
   fi
@@ -735,6 +740,18 @@ append_split_app_match_redirect() {
   fi
 }
 
+append_split_app_match_return() {
+  local chain_name="$1"
+  local pin="$2"
+
+  if dns_tcp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p tcp --dport 53 -m bpf --object-pinned "${pin}" -j RETURN
+  fi
+  if dns_udp_enabled; then
+    ensure_rule_append nat "${chain_name}" -p udp --dport 53 -m bpf --object-pinned "${pin}" -j RETURN
+  fi
+}
+
 append_split_domestic_redirect() {
   local chain_name="$1"
   local port="$2"
@@ -754,12 +771,16 @@ setup_split_app_dns_nat_rules() {
   local foreign_state="down"
   local domestic_state="down"
   local fallback_state="down"
+  local has_apps="false"
 
-  pin="$(dns_app_bpf_pin)"
-  [ -e "${pin}" ] || {
-    log Error "split-apps eBPF matcher 不存在: ${pin}"
-    return 1
-  }
+  uid_list_has_entries && has_apps="true"
+  if [ "${has_apps}" = "true" ]; then
+    pin="$(dns_app_bpf_pin)"
+    [ -e "${pin}" ] || {
+      log Error "split-apps eBPF matcher 不存在: ${pin}"
+      return 1
+    }
+  fi
 
   foreign_port="${foreign_dns_port:-5592}"
   domestic_port="${domestic_dns_port:-5591}"
@@ -776,21 +797,44 @@ setup_split_app_dns_nat_rules() {
     foreign_target="${foreign_port}"
   elif [ "${fallback_state}" = "up" ]; then
     foreign_target="${fallback_port}"
-    [ "${family}" = "4" ] && log Warning "Foreign AGH :${foreign_port} 不可用，白名单 DNS 回退到 Mihomo :${fallback_port}"
+    [ "${family}" = "4" ] && log Warning "Foreign AGH :${foreign_port} 不可用，代理应用 DNS 回退到 Mihomo :${fallback_port}"
   else
     foreign_target="${fail_port}"
-    [ "${family}" = "4" ] && log Error "Foreign AGH 与 Mihomo DNS 均不可用；白名单 DNS fail-closed 到本地 :${fail_port}"
+    [ "${family}" = "4" ] && log Error "Foreign AGH 与 Mihomo DNS 均不可用；代理应用 DNS fail-closed 到本地 :${fail_port}"
   fi
 
-  append_split_app_match_redirect "${chain_name}" "${pin}" "${foreign_target}"
+  case "${proxy_mode}" in
+    whitelist|white)
+      # Selected apps are proxied: selected -> Foreign, everything else -> Domestic.
+      if [ "${has_apps}" = "true" ]; then
+        append_split_app_match_redirect "${chain_name}" "${pin}" "${foreign_target}"
+      fi
+      if [ "${domestic_state}" = "up" ]; then
+        append_split_domestic_redirect "${chain_name}" "${domestic_port}"
+      else
+        [ "${family}" = "4" ] && log Warning "Domestic AGH :${domestic_port} 不可用；非白名单恢复 Android 系统 DNS"
+      fi
+      ;;
+    blacklist|black)
+      # Selected apps are direct: selected -> Domestic (or system DNS if Domestic is down);
+      # everything else remains proxied and therefore uses Foreign/fallback/fail-closed.
+      if [ "${has_apps}" = "true" ]; then
+        if [ "${domestic_state}" = "up" ]; then
+          append_split_app_match_redirect "${chain_name}" "${pin}" "${domestic_port}"
+        else
+          append_split_app_match_return "${chain_name}" "${pin}"
+          [ "${family}" = "4" ] && log Warning "Domestic AGH :${domestic_port} 不可用；黑名单应用恢复 Android 系统 DNS"
+        fi
+      fi
+      append_split_domestic_redirect "${chain_name}" "${foreign_target}"
+      ;;
+    *)
+      log Error "DNS split-apps 不支持代理模式: ${proxy_mode}"
+      return 1
+      ;;
+  esac
 
-  if [ "${domestic_state}" = "up" ]; then
-    append_split_domestic_redirect "${chain_name}" "${domestic_port}"
-  else
-    [ "${family}" = "4" ] && log Warning "Domestic AGH :${domestic_port} 不可用；非白名单恢复 Android 系统 DNS"
-  fi
-
-  [ "${family}" = "4" ] && log Info "DNS split-apps: foreign=${foreign_state} fallback=${fallback_state} domestic=${domestic_state}"
+  [ "${family}" = "4" ] && log Info "DNS split-apps: mode=${proxy_mode} foreign=${foreign_state} fallback=${fallback_state} domestic=${domestic_state}"
 }
 
 ensure_split_ipv6_dns_reject() {
@@ -827,7 +871,12 @@ setup_nat_dns_hijack() {
   if dns_mode_is_split_apps; then
     setup_split_app_dns_nat_rules "${chain_name}" "${family}" || return 1
     ensure_jump nat OUTPUT "${chain_name}"
-    [ "${iptables}" = "$IPV" ] && log Info "DNS split-apps：白名单 -> Foreign AGH，非白名单 -> Domestic AGH"
+    if [ "${iptables}" = "$IPV" ]; then
+      case "${proxy_mode}" in
+        whitelist|white) log Info "DNS split-apps：白名单应用 -> Foreign AGH，其余 -> Domestic AGH" ;;
+        blacklist|black) log Info "DNS split-apps：黑名单应用 -> Domestic AGH，其余 -> Foreign AGH" ;;
+      esac
+    fi
     return 0
   fi
 
