@@ -39,8 +39,13 @@ jobs:
         shell: bash
         run: |
           ruby -e 'require "yaml"; YAML.load_file("box/mihomo/config.yaml")'
-          grep -F "'https://8.8.8.8/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F "'https://doh.cleanbrowsing.org/doh/security-filter/#国外代理'" box/mihomo/config.yaml
           grep -F "'https://1.1.1.1/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F "'https://1.0.0.1/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F "'https://dns.google/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F "'https://dns.quad9.net/dns-query#国外代理'" box/mihomo/config.yaml
+          grep -F 'https://223.5.5.5/dns-query' box/mihomo/config.yaml
+          grep -F 'https://1.12.12.12/dns-query' box/mihomo/config.yaml
           if grep -q '^[[:space:]]*nameserver-policy:' box/mihomo/config.yaml; then
             echo "default Mihomo config must not split app DNS back to domestic resolvers"
             exit 1
