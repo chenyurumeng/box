@@ -7,6 +7,13 @@
 - [CHIZI-0618/AndroidTProxyShell](https://github.com/CHIZI-0618/AndroidTProxyShell)
 - [taamarin/box_for_magisk](https://github.com/taamarin/box_for_magisk)
 
+
+### split-apps + Dual AdGuard Home
+
+实验性 `dns_hijack_mode="split-apps"` 可将白名单应用 DNS 送到 Foreign AGH :5592，其余应用 DNS 送到 Domestic AGH :5591。运行中实例故障会动态回退：Domestic 故障恢复系统 DNS，Foreign 故障回退 Mihomo :1053；两种国外后端都不可用时白名单 DNS fail-closed。独立 `box/scripts/dns-rescue.sh` 可无条件移除 Box DNS hooks。
+
+验证步骤见 [docs/split-apps-agh-validation.md](docs/split-apps-agh-validation.md)。
+
 ## 项目定位
 
 本仓库主要提供：
@@ -40,6 +47,42 @@
 - `box.service`: 启停、重启、状态与定时任务控制
 - `box.iptables`: 透明代理规则启用、重建、清理
 - `box.tool`: 订阅更新、Geo 更新、核心更新、配置检查、WebUI 相关维护
+
+## 应用级 DNS 分流（实验）
+
+开发分支支持 `dns_hijack_mode="redirect-apps"`，用于 Root 透明代理下按应用 UID 分流 DNS，而不依赖 Android `VpnService`。
+
+工作方式：
+
+```text
+代理应用 UID
+  -> Android DnsResolver
+  -> boxbpf / bpf_get_socket_uid()
+  -> REDIRECT 到本地核心 DNS
+
+非代理应用 UID
+  -> 不命中 eBPF matcher
+  -> 保持 Android / 当前网络 DNS
+```
+
+当前第一版支持 `redirect / tproxy / mixed / enhance` 网络模式，暂不支持 `tun / ebpf` 网络模式。
+
+启用前先安装 eBPF matcher：
+
+```sh
+/data/adb/box/scripts/box.tool upboxbpf
+```
+
+然后在 `/data/adb/box/settings.ini` 中配置：
+
+```sh
+proxy_mode="whitelist"
+dns_hijack_mode="redirect-apps"
+```
+
+并在 `package.list.cfg` 中填写需要代理的应用包名。模块启动时会动态解析 UID，应用重装后无需手工维护固定 UID。
+
+如果设备不支持 `xt_bpf`、无法加载 `boxbpf` 或 UID 列表为空，`redirect-apps` 会停止规则应用，不会回退为全局 DNS 劫持。
 
 ## 文档与社区
 

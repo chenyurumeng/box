@@ -5,6 +5,19 @@ source /data/adb/box/settings.ini
 
 PROPFILE="/data/adb/modules/box_for_root/module.prop"
 
+# Marks an intentional user/service stop.  AGH watchdog and renew-dns must not
+# recreate DNS hooks while this file exists.
+box_user_stopped_file="${box_run_state}/user_stopped"
+
+mark_user_stopped() {
+  mkdir -p "${box_run_state}" >/dev/null 2>&1 || true
+  : > "${box_user_stopped_file}"
+}
+
+clear_user_stopped() {
+  rm -f "${box_user_stopped_file}" >/dev/null 2>&1 || true
+}
+
 sed_file_if_changed() {
   local file="$1"
   shift
@@ -101,9 +114,12 @@ find_packages_uid() {
 
   rm -f "${request_file}" "${map_file}" >/dev/null 2>&1 || true
 
+  # GID 与应用 UID 必须保持为两个独立集合。
+  # gid.list.cfg 会在 iptables 规则中通过 --gid-owner 单独处理；
+  # 不能写入 appuid.list，否则 GID 数值会被后续逻辑误当成 --uid-owner，
+  # 造成 UID 数值碰撞的非白名单应用被错误代理，同时污染 DNS eBPF UID map。
   if [ ${#gid_list[@]} -gt 0 ]; then
-    printf "%s\n" "${gid_list[@]}" >> "${uid_list}"
-    log Debug "GID: ${gid_list[*]} -> 已添加"
+    log Debug "GID: ${gid_list[*]} -> 保持独立，不写入 appuid.list"
   fi
 
   if [ -s "${uid_list}" ]; then
@@ -1372,6 +1388,49 @@ force_stop() {
   fi
 }
 
+apply_app_rules() {
+  # settings.ini and package.list.cfg are sourced/read at process start, so this
+  # command is intentionally invoked as a fresh box.service process by the app.
+  find_packages_uid
+  get_dns_mode
+
+  if ! busybox pidof "${bin_name}" >/dev/null 2>&1; then
+    log Warning "Box 当前未运行；应用分流配置已保存，将在下次启动时生效。"
+    return 0
+  fi
+
+  case "${bin_name}" in
+    mihomo)
+      if [ "${auto_modify_config}" = "true" ]; then
+        prepare_mihomo
+      fi
+      "${scripts_dir}/box.tool" reload || {
+        log Error "Mihomo 配置热重载失败"
+        return 1
+      }
+      ;;
+    sing-box)
+      if [ "${auto_modify_config}" = "true" ]; then
+        prepare_singbox
+      fi
+      "${scripts_dir}/box.tool" reload || {
+        log Warning "sing-box 热重载失败，回退为服务重启"
+        "${scripts_dir}/box.service" restart
+        return $?
+      }
+      ;;
+    *)
+      log Warning "${bin_name} 不支持应用列表热重载，回退为服务重启"
+      "${scripts_dir}/box.service" restart
+      return $?
+      ;;
+  esac
+
+  "${scripts_dir}/box.iptables" renew || return 1
+  log Info "应用分流已实时应用: mode=${proxy_mode}, count=$(busybox wc -l < "${uid_list}" 2>/dev/null)"
+  return 0
+}
+
 # 检查系统是否安装了 busybox
 if ! command -v busybox &> /dev/null; then
   log Error "$(which busybox) 命令未找到"
@@ -1380,20 +1439,34 @@ fi
 
 case "$1" in
   start)
+    # Keep the intentional-stop guard active while stale rules/core state are
+    # removed, then clear it immediately before starting the core.
+    mark_user_stopped
+    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box >/dev/null 2>&1
+    clear_user_stopped
     if start_box; then
         $scripts_dir/box.tool webroot >/dev/null 2>&1
     fi
     ;;
   stop)
+    # The marker must exist before disable/stop.  Otherwise the AGH watchdog
+    # can observe :1053 disappearing and race a renew-dns after cleanup.
+    mark_user_stopped
+    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box
     ;;
   restart)
+    mark_user_stopped
     "${scripts_dir}/box.iptables" disable && stop_box
+    clear_user_stopped
     if start_box; then
       "${scripts_dir}/box.iptables" renew
       $scripts_dir/box.tool webroot >/dev/null 2>&1
     fi
+    ;;
+  apply-apps)
+    apply_app_rules
     ;;
   status)
     # 检查服务是否在运行
