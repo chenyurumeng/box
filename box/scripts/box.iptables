@@ -498,6 +498,11 @@ apply_capability_downgrades() {
     dns_hijack_mode="redirect"
   fi
 
+  if dns_mode_is_split_apps && [ "${performance_mode}" = "true" ]; then
+    log Warning "DNS split-apps 第一版禁用 performance_mode，确保 AGH 上游 DIRECT bypass 与 UID 分流一致。"
+    performance_mode="false"
+  fi
+
   if [ "${bypass_cn_ip}" = "true" ] && [ "${cap_ipset}" != "true" ]; then
     log Warning "降级: ipset 不可用，大陆IP分流 true -> false"
     bypass_cn_ip="false"
@@ -2918,19 +2923,74 @@ log_iptables_results() {
   [ -n "$applied_uids" ] && log Debug "UID 列表: ${applied_uids}"
 }
 
+renew_split_dns_atomic_v4() {
+  local active="NAT_DNS_HIJACK"
+  local next="NAT_DNS_HIJACK_NEXT"
+
+  iptables="$IPV"
+
+  # Build a complete replacement chain before touching the active hook.
+  del_jump_silent nat OUTPUT "${next}"
+  cleanup_chain_fast nat "${next}"
+  ensure_chain nat "${next}" || return 1
+
+  if ! add_core_bypass_rule nat "${next}" -I; then
+    log Warning "DNS 原子刷新：核心进程旁路失败，将继续构建规则。"
+  fi
+  setup_split_app_dns_nat_rules "${next}" "4" || {
+    cleanup_chain_fast nat "${next}"
+    return 1
+  }
+
+  # NEXT goes first, so there is never a window where whitelist DNS can fall
+  # through to Android system DNS.
+  ensure_rule_insert nat OUTPUT -j "${next}" || {
+    cleanup_chain_fast nat "${next}"
+    return 1
+  }
+
+  del_jump_silent nat OUTPUT "${active}"
+  cleanup_chain_fast nat "${active}"
+
+  if ! ${IPV} -t nat -E "${next}" "${active}" >/dev/null 2>&1; then
+    # Keep NEXT hooked if rename is unavailable; service remains safe and the
+    # next refresh will clean it before rebuilding.
+    log Warning "DNS 原子刷新：链重命名失败，暂保留 ${next} 作为活动链。"
+  fi
+
+  return 0
+}
+
 renew_dns_only() {
   apply_capability_downgrades
+  probe_user_group || log Warning "DNS 健康刷新未能探测 Box 核心 UID/GID，将使用可用旁路规则。"
 
   if dns_mode_uses_app_bpf && [ ! -e "${boxbpf_pin_app4}" ]; then
     prepare_dns_app_bpf || return 1
   fi
 
-  local current_iptables
-  for current_iptables in "$IPV" "$IP6V"; do
-    iptables="${current_iptables}"
-    cleanup_dns_nat_hijack_chains >/dev/null 2>&1 || true
-    ensure_dns_nat_hijack || return 1
-  done
+  if dns_mode_is_split_apps; then
+    renew_split_dns_atomic_v4 || return 1
+
+    iptables="$IP6V"
+    if [ "${ipv6}" = "true" ]; then
+      if ip6_nat_supported; then
+        cleanup_dns_nat_hijack_chains >/dev/null 2>&1 || true
+        ensure_dns_nat_hijack || return 1
+      else
+        ensure_split_ipv6_dns_reject || return 1
+      fi
+    else
+      cleanup_split_ipv6_dns_reject >/dev/null 2>&1 || true
+    fi
+  else
+    local current_iptables
+    for current_iptables in "$IPV" "$IP6V"; do
+      iptables="${current_iptables}"
+      cleanup_dns_nat_hijack_chains >/dev/null 2>&1 || true
+      ensure_dns_nat_hijack || return 1
+    done
+  fi
 
   log Info "DNS 规则健康刷新完成。"
 }
