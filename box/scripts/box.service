@@ -5,6 +5,19 @@ source /data/adb/box/settings.ini
 
 PROPFILE="/data/adb/modules/box_for_root/module.prop"
 
+# Marks an intentional user/service stop.  AGH watchdog and renew-dns must not
+# recreate DNS hooks while this file exists.
+box_user_stopped_file="${box_run_state}/user_stopped"
+
+mark_user_stopped() {
+  mkdir -p "${box_run_state}" >/dev/null 2>&1 || true
+  : > "${box_user_stopped_file}"
+}
+
+clear_user_stopped() {
+  rm -f "${box_user_stopped_file}" >/dev/null 2>&1 || true
+}
+
 sed_file_if_changed() {
   local file="$1"
   shift
@@ -1383,22 +1396,27 @@ fi
 
 case "$1" in
   start)
-    # Always remove stale transparent/DNS rules before bringing the core up.
-    # action.sh will install fresh rules after start succeeds.
+    # Keep the intentional-stop guard active while stale rules/core state are
+    # removed, then clear it immediately before starting the core.
+    mark_user_stopped
     "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box >/dev/null 2>&1
+    clear_user_stopped
     if start_box; then
         $scripts_dir/box.tool webroot >/dev/null 2>&1
     fi
     ;;
   stop)
-    # Direct box.service stop must be a complete network recovery action, not
-    # merely kill Mihomo while leaving REDIRECT/TPROXY hooks behind.
+    # The marker must exist before disable/stop.  Otherwise the AGH watchdog
+    # can observe :1053 disappearing and race a renew-dns after cleanup.
+    mark_user_stopped
     "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 || true
     stop_box
     ;;
   restart)
+    mark_user_stopped
     "${scripts_dir}/box.iptables" disable && stop_box
+    clear_user_stopped
     if start_box; then
       "${scripts_dir}/box.iptables" renew
       $scripts_dir/box.tool webroot >/dev/null 2>&1
